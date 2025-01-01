@@ -1,64 +1,60 @@
-import pygame.midi
-import fluidsynth
+import mido
+from magenta.music import midi_io, note_sequence_io
+from magenta.music.protobuf import music_pb2
+from magenta.music import midi_synth
 import soundfile as sf
 
 # Set paths
-soundfont_path = "FluidR3_GM.sf2"  # Replace with your SoundFont file path
+soundfont_path = "FluidR3_GM.sf2"  # Path to your SoundFont file
 output_wav = "output.wav"  # Path to save the WAV file
+output_midi = "output.mid"  # Path to save the MIDI file
 
-# Initialize FluidSynth
-fs = fluidsynth.Synth()
-
-# Configure audio output to a WAV file
-fs.start(driver="dsound")  # Use "dsound" for real-time playback
-sfid = fs.sfload(soundfont_path)
-fs.program_select(0, sfid, 0, 0)  # Bank 0, Preset 0 (default piano)
-
-# Initialize Pygame MIDI
-pygame.midi.init()
+# Initialize MIDI Synthesizer
+synth = midi_synth.fluidsynth.FluidSynth(soundfont_path)
 
 # List available MIDI input devices
-print("Available MIDI Input Devices:")
-for i in range(pygame.midi.get_count()):
-    print(f"{i}: {pygame.midi.get_device_info(i)}")
-
-# Open the first available MIDI input device
-input_id = pygame.midi.get_default_input_id()
-if input_id == -1:
-    print("No MIDI input device found.")
-    pygame.midi.quit()
+print("Available MIDI Input Ports:")
+available_ports = mido.get_input_names()
+if not available_ports:
+    print("No MIDI input ports found. Ensure your device is connected.")
     exit()
 
-input_id = 1  # Use the input port for AKM320
-midi_input = pygame.midi.Input(input_id)
+print(available_ports)
+input_port_name = available_ports[0]  # Replace with your desired MIDI port name
 
-# Start listening to MIDI input
-print(f"Listening to MIDI input on device {input_id}. Press Ctrl+C to stop.")
+# Open MIDI input port
+with mido.open_input(input_port_name) as inport:
+    print(f"Listening to MIDI input on: {input_port_name}. Press Ctrl+C to stop.")
 
-try:
-    while True:
-        if midi_input.poll():
-            midi_events = midi_input.read(10)  # Read up to 10 MIDI events at a time
-            for event in midi_events:
-                data = event[0]
-                status, note, velocity, _ = data
-                print(f"Received MIDI event: status={status}, note={note}, velocity={velocity}")
+    # Create a Magenta NoteSequence
+    sequence = music_pb2.NoteSequence()
 
-                # Handle note on/off events
-                if status == 144 and velocity > 0:  # Note on
-                    fs.noteon(0, note, velocity)
-                elif status == 128 or (status == 144 and velocity == 0):  # Note off
-                    fs.noteoff(0, note)
-except KeyboardInterrupt:
-    print("Stopping MIDI input and saving audio output...")
-finally:
-    # Record audio output to a file
-    print("Recording audio...")
-    audio_data = fs.get_audio()
-    sf.write(output_wav, audio_data, 44100)  # Write audio data to WAV
+    try:
+        for msg in inport:
+            print(f"Received MIDI message: {msg}")
+
+            # Parse MIDI message
+            if msg.type == 'note_on':
+                sequence.notes.add(
+                    pitch=msg.note,
+                    velocity=msg.velocity,
+                    start_time=msg.time,
+                    end_time=msg.time + 0.5  # Add duration for note_on
+                )
+            elif msg.type == 'note_off':
+                for note in sequence.notes:
+                    if note.pitch == msg.note and note.end_time == 0:
+                        note.end_time = msg.time
+                        break
+    except KeyboardInterrupt:
+        print("Stopping MIDI input. Saving MIDI file...")
+
+    # Save the NoteSequence as a MIDI file
+    midi_io.sequence_proto_to_midi_file(sequence, output_midi)
+    print(f"MIDI saved to {output_midi}")
+
+    # Convert MIDI to WAV using Magenta's FluidSynth
+    print("Converting MIDI to WAV...")
+    audio_data = synth.synthesize(sequence)
+    sf.write(output_wav, audio_data, 44100)
     print(f"Audio saved to {output_wav}")
-
-    # Cleanup
-    midi_input.close()
-    pygame.midi.quit()
-    fs.delete()
